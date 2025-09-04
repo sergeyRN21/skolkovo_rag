@@ -7,4 +7,5 @@ PyPDF2
 sentence-transformers
 networkx
 matplotlib
+bcrypt
 langchain-experimental
