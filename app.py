@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import os
 import yaml
@@ -8,36 +9,23 @@ from datetime import datetime
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-# --- ИЗМЕНЕНО: Импорты для Chroma с DuckDB ---
-import chromadb
-from chromadb import Settings
-from langchain_chroma import Chroma
+# --- ИЗМЕНЕНО: Импорт FAISS ---
+from langchain_community.vectorstores import FAISS
 # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
-from backup import create_backup, list_backups, restore_backup
+from backup import create_backup, list_backups, restore_backup # Убедитесь, что backup.py совместим
 
 # Подавляем предупреждения
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # Загрузка переменных окружения
 load_dotenv()
 
-# --- ДОБАВЛЕНО: Функция для создания клиента Chroma с DuckDB ---
-PERSIST_DIRECTORY = "chroma_skolkovo"
-
-def get_chroma_client():
-    """Создает и возвращает клиент Chroma, использующий DuckDB."""
-    client = chromadb.PersistentClient(
-        path=PERSIST_DIRECTORY,
-        settings=Settings(
-            allow_reset=True, # Опционально
-            is_persistent=True
-        )
-    )
-    return client
-# --- КОНЕЦ ДОБАВЛЕНИЯ ---
+# --- ИЗМЕНЕНО: Константа для пути к индексу FAISS ---
+PERSIST_DIRECTORY = "faiss_index"
+# --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 def get_llm():
     """Инициализирует и возвращает LLM через OpenRouter API."""
@@ -71,9 +59,7 @@ class DocumentProcessor:
     """Обработка и индексация PDF-документов."""
     def __init__(self, embeddings):
         self.embeddings = embeddings
-        # --- ДОБАВЛЕНО: Хранение клиента ---
-        self.client = get_chroma_client()
-        # --- КОНЕЦ ДОБАВЛЕНИЯ ---
+        # Для FAISS мы будем управлять индексом напрямую, а не через клиента
 
     def determine_doc_type(self, pdf_path):
         """Определяет тип документа по имени файла"""
@@ -94,7 +80,7 @@ class DocumentProcessor:
             return "Документ"
 
     def index_pdf(self, pdf_path):
-        """Индексирует PDF-файл и сохраняет в Chroma."""
+        """Индексирует PDF-файл и сохраняет в FAISS."""
         if not os.path.exists(pdf_path):
             st.error(f"Файл {pdf_path} не найден!")
             return None
@@ -136,29 +122,40 @@ class DocumentProcessor:
                 st.error(f"Не удалось создать чанки из файла {pdf_path}")
                 return None
 
-            # --- ИЗМЕНЕНО: Использование клиента ---
-            db = Chroma.from_documents(docs, self.embeddings, client=self.client)
+            # --- ИЗМЕНЕНО: Создание и сохранение FAISS индекса ---
+            try:
+                # Загружаем существующий индекс, если он есть
+                if os.path.exists(PERSIST_DIRECTORY):
+                    db = FAISS.load_local(PERSIST_DIRECTORY, self.embeddings, allow_dangerous_deserialization=True)
+                    # Добавляем новые документы
+                    db.add_documents(docs)
+                else:
+                    # Создаем новый индекс
+                    db = FAISS.from_documents(docs, self.embeddings)
+                
+                # Сохраняем индекс
+                db.save_local(PERSIST_DIRECTORY)
+                st.success(f"✅ Документ {os.path.basename(pdf_path)} успешно индексирован!")
+                return db
+            except Exception as e:
+                st.error(f"Ошибка при работе с FAISS: {e}")
+                return None
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-            st.success(f"✅ Документ {os.path.basename(pdf_path)} успешно индексирован!")
-            return db
 
     def get_indexed_files(self):
         """Получает список индексированных файлов."""
         try:
-            # --- ИЗМЕНЕНО: Использование клиента ---
+            # --- ИЗМЕНЕНО: Проверка и загрузка из FAISS ---
             if os.path.exists(PERSIST_DIRECTORY):
-                db = Chroma(client=self.client, embedding_function=self.embeddings)
-                docs = db.get()
-                if docs and docs.get('ids'):
-                    sources = set()
-                    metadatas = docs.get('metadatas', [])
-                    if metadatas:
-                        for metadata in metadatas:
-                             source_path = metadata.get('source')
-                             if source_path:
-                                 filename = os.path.basename(source_path)
-                                 sources.add(filename)
-                        return sorted(list(sources)) # Сортируем для порядка
+                # FAISS не хранит метаданные о файлах напрямую.
+                # Мы можем попробовать загрузить индекс и посмотреть примеры.
+                # Но проще и надежнее хранить список файлов отдельно.
+                # Создадим вспомогательный файл для отслеживания.
+                tracker_file = os.path.join(PERSIST_DIRECTORY, "indexed_files.yaml")
+                if os.path.exists(tracker_file):
+                    with open(tracker_file, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                        return data.get("files", [])
             return []
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except Exception as e:
@@ -167,26 +164,32 @@ class DocumentProcessor:
 
     def remove_document_from_index(self, filename):
         """Удаляет документ из индекса."""
-        try:
-            # --- ИЗМЕНЕНО: Использование клиента ---
-            if os.path.exists(PERSIST_DIRECTORY):
-                db = Chroma(client=self.client, embedding_function=self.embeddings)
-                docs = db.get()
-                ids_to_delete = []
-                for i, metadata in enumerate(docs['metadatas']):
-                    if 'source' in metadata and os.path.basename(metadata['source']) == filename:
-                        ids_to_delete.append(docs['ids'][i])
-                if ids_to_delete:
-                    db.delete(ids_to_delete)
-                    st.success(f"✅ Документ {filename} удален из индекса!")
-                    return True
-                else:
-                    st.warning(f"Документ {filename} не найден в индексе")
-                    return False
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-        except Exception as e:
-            st.error(f"Ошибка при удалении документа: {e}")
-            return False
+        st.warning("Удаление отдельных документов из FAISS-индекса не поддерживается напрямую в этом приложении.")
+        st.info("Вы можете удалить весь индекс и переиндексировать оставшиеся файлы.")
+        return False
+        # Примечание: FAISS не имеет встроенной функции удаления документов по метаданным.
+        # Это требует более сложной логики, например, пересоздания индекса без ненужных документов.
+        # Для простоты мы отключаем эту функцию.
+
+    def _update_index_tracker(self, added_files=None, removed_files=None):
+        """Вспомогательная функция для обновления списка индексированных файлов."""
+        tracker_file = os.path.join(PERSIST_DIRECTORY, "indexed_files.yaml")
+        data = {"files": []}
+        if os.path.exists(tracker_file):
+            with open(tracker_file, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {"files": []}
+        
+        current_files = set(data["files"])
+        if added_files:
+            current_files.update(added_files)
+        if removed_files:
+            current_files.difference_update(removed_files)
+        
+        data["files"] = sorted(list(current_files))
+        
+        os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
+        with open(tracker_file, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, allow_unicode=True)
 
     def auto_index_all_pdfs(self):
         """Автоматически индексирует все PDF-файлы в папке data при запуске."""
@@ -194,22 +197,32 @@ class DocumentProcessor:
             os.makedirs("data")
             st.info("Создана папка 'data'. Поместите сюда PDF-файлы для индексации.")
             return
+        
         pdf_files = [f for f in os.listdir("data") if f.endswith('.pdf')]
         if not pdf_files:
             st.info("В папке 'data' не найдено PDF-файлов для индексации")
             return
+        
         indexed_files = self.get_indexed_files()
         files_to_index = [f for f in pdf_files if f not in indexed_files]
 
         if files_to_index:
              st.info(f"Найдено {len(files_to_index)} новых файлов для индексации.")
+             indexed_successfully = []
              for pdf_file in files_to_index:
                  pdf_path = f"data/{pdf_file}"
                  try:
-                     self.index_pdf(pdf_path)
+                     # index_pdf теперь обновляет существующий индекс
+                     if self.index_pdf(pdf_path) is not None:
+                         indexed_successfully.append(pdf_file)
                  except Exception as e:
                      st.error(f"Ошибка при индексации {pdf_file}: {str(e)}")
-             st.success("✅ Автоматическая индексация завершена!")
+             
+             if indexed_successfully:
+                 self._update_index_tracker(added_files=indexed_successfully)
+                 st.success("✅ Автоматическая индексация завершена!")
+             else:
+                 st.warning("Индексация не добавила новых документов.")
         else:
              st.info("Все PDF-файлы в папке 'data' уже проиндексированы.")
 
@@ -284,7 +297,7 @@ class RAGSystem:
     def query_rag(self, question):
         """Задаёт вопрос и возвращает ответ + источник."""
         try:
-            # --- ИЗМЕНЕНО: Проверка через клиента ---
+            # --- ИЗМЕНЕНО: Проверка через FAISS ---
             if not os.path.exists(PERSIST_DIRECTORY):
                 response = {
                     "answer": "❌ База знаний не найдена. Пожалуйста, загрузите документы.",
@@ -294,9 +307,18 @@ class RAGSystem:
                 self.log_manager.log_request(question, response["answer"], response["sources"], False)
                 return response
 
-            # --- ИЗМЕНЕНО: Использование клиента ---
-            client = get_chroma_client() # Получаем клиент
-            db = Chroma(client=client, embedding_function=self.embeddings)
+            # --- ИЗМЕНЕНО: Загрузка FAISS индекса ---
+            try:
+                db = FAISS.load_local(PERSIST_DIRECTORY, self.embeddings, allow_dangerous_deserialization=True)
+            except Exception as e:
+                st.error(f"❌ Не удалось загрузить FAISS индекс: {e}")
+                response = {
+                    "answer": f"❌ Ошибка при загрузке базы знаний: {str(e)}",
+                    "sources": ["Система"],
+                    "from_template": False
+                }
+                self.log_manager.log_request(question, response["answer"], response["sources"], False)
+                return response
             # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             try:
@@ -311,13 +333,15 @@ class RAGSystem:
                 self.log_manager.log_request(question, response["answer"], response["sources"], False)
                 return response
             
+            # --- ИЗМЕНЕНО: Настройка ретривера для FAISS ---
             retriever = db.as_retriever(
                 search_type="similarity_score_threshold",
                 search_kwargs={
-                    "k": 75,
-                    "score_threshold": 0.3
+                    "k": 75, # Можно настроить
+                    "score_threshold": 0.3 # Можно настроить
                 }
             )
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             system_prompt = self.prompt_manager.load_system_prompt()
 
@@ -711,7 +735,7 @@ class SkolkovoConsultantApp:
         if st.session_state.role in ["admin", "editor"]:
             with st.sidebar:
                 st.header("⚙️ Управление")
-                # --- ИЗМЕНЕНО: Проверка через os.path.exists(PERSIST_DIRECTORY) ---
+                # --- ИЗМЕНЕНО: Проверка через FAISS ---
                 if os.path.exists(PERSIST_DIRECTORY):
                     st.success("✅ База знаний загружена")
                     # --- ИЗМЕНЕНО: Используем метод из rag_system ---
@@ -724,14 +748,14 @@ class SkolkovoConsultantApp:
                             with col1:
                                 st.write(f"📄 {filename}")
                             with col2:
-                                if st.session_state.role == "admin":
-                                    if st.button("❌", key=f"delete_{filename}", help=f"Удалить {filename}"):
-                                        # --- ИЗМЕНЕНО: Используем метод из rag_system ---
-                                        if self.rag_system.document_processor.remove_document_from_index(filename):
-                                            st.rerun()
-                                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-                                else:
-                                    st.write("")
+                                # --- ИЗМЕНЕНО: Отключена кнопка удаления ---
+                                # if st.session_state.role == "admin":
+                                #     if st.button("❌", key=f"delete_{filename}", help=f"Удалить {filename}"):
+                                #         if self.rag_system.document_processor.remove_document_from_index(filename):
+                                #             st.rerun()
+                                # else:
+                                st.write("(Удаление отдельных документов из FAISS не поддерживается)")
+                                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                 else:
                     st.warning("❌ База знаний не найдена")
                 
