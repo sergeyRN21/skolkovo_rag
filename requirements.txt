@@ -1,0 +1,10 @@
+streamlit
+langchain
+langchain-community
+langchain-qdrant
+qdrant-client
+PyPDF2
+sentence-transformers
+networkx
+matplotlib
+langchain-experimental
