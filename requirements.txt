@@ -6,11 +6,12 @@ langchain-chroma>=0.1.0
 langchain-huggingface>=0.1.0
 langchain-openai>=0.2.0
 pypdf>=5.0.0
-chromadb>=0.5.0
+chromadb>=0.5.0 # Убедитесь, что это последняя стабильная версия
 sentence-transformers>=3.0.0
 openai>=1.52.0
 pyyaml>=6.0
 bcrypt>=4.0.0
 pandas>=2.0.0
-numpy
-
+# Часто помогает указать версию protobuf напрямую
+protobuf>=4.25.0
+numpy>=1.24.0 # Иногда требуется явная установка numpy
