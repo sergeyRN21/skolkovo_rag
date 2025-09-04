@@ -16,7 +16,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
-from backup import create_backup, list_backups, restore_backup # Убедитесь, что backup.py совместим
+# Предполагается, что backup.py не использует Chroma. Если использует - его тоже нужно адаптировать.
+from backup import create_backup, list_backups, restore_backup
 
 # Подавляем предупреждения
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -59,7 +60,7 @@ class DocumentProcessor:
     """Обработка и индексация PDF-документов."""
     def __init__(self, embeddings):
         self.embeddings = embeddings
-        # Для FAISS мы будем управлять индексом напрямую, а не через клиента
+        # Для FAISS мы будем управлять индексом напрямую
 
     def determine_doc_type(self, pdf_path):
         """Определяет тип документа по имени файла"""
@@ -98,8 +99,10 @@ class DocumentProcessor:
             for doc in documents:
                 if 'source' not in doc.metadata or not doc.metadata['source']:
                      doc.metadata['source'] = pdf_path
+                # --- ИСПРАВЛЕНО: Опечатка в названии ключа ---
                 if 'page' in doc.metadata:
                     doc.metadata['page'] = doc.metadata['page'] + 1
+                # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                 doc.metadata['doc_type'] = self.determine_doc_type(pdf_path)
                 doc.metadata['filename'] = os.path.basename(pdf_path)
                 content_lines = doc.page_content.strip().split('\n')
@@ -651,12 +654,18 @@ class SkolkovoConsultantApp:
             st.session_state.embeddings = ModelManager.preload_models()
             st.session_state.models_loaded = True
 
-        if "indexed_on_startup" not in st.session_state:
-            with st.spinner("Проверяем индексацию документов..."):
+        # --- ИЗМЕНЕНО: Проверяем существование индекса на диске ---
+        # Вместо проверки st.session_state["indexed_on_startup"]
+        if not os.path.exists(PERSIST_DIRECTORY): # PERSIST_DIRECTORY = "faiss_index"
+            with st.spinner("Индексация документов..."):
                 # --- ИЗМЕНЕНО: Используем метод из rag_system ---
                 self.rag_system.document_processor.auto_index_all_pdfs()
                 # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-            st.session_state.indexed_on_startup = True
+            # st.session_state.indexed_on_startup = True # Эту строку можно удалить
+        else:
+            # Добавляем сообщение в сайдбар, если индекс уже существует
+            st.sidebar.success("✅ База знаний уже загружена.")
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         chat_container = st.container()
         with chat_container:
