@@ -1,0 +1,13 @@
+users:
+- username: admin
+  password_hash: $2b$12$QMmIOg9tCmTkZrwbrwl9helnvvyuzDExc8XmcvtBKspzQ/DdmFmo6
+  role: admin
+- username: editor
+  password_hash: $$2b$12$2MenNcyHuLbIXtiUACmSYu2wpBpi/B1GkCku560ykztr4fswtze8u
+  role: editor
+- username: user
+  password_hash: $2b$12$BBvSjirj8MyZ86ijevymGedCcz5FP.INusx1wwl8VPzKxjcglzAyW
+  role: user
+- username: sergey
+  password_hash: $2b$12$rN6E6/rHJXE8/4MJfGi69.lCqWkeDG.INIYsPq55UCmJstnqDSwk6
+  role: editor
