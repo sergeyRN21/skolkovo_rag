@@ -11,4 +11,4 @@ matplotlib
 bcrypt
 langchain-experimental
 langchain-chroma
-chromadb
+chromadb==0.4.24
