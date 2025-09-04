@@ -10,4 +10,4 @@ matplotlib
 bcrypt
 langchain-experimental
 langchain-chroma
-
+chromadb
