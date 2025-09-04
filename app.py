@@ -1,60 +1,80 @@
 import streamlit as st
 import os
 import yaml
-import json
 import bcrypt
 import csv
 import warnings
-import re
 from datetime import datetime
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+# --- ИЗМЕНЕНО: Импорты для Chroma с DuckDB ---
+import chromadb
+from chromadb import Settings
 from langchain_chroma import Chroma
+# --- КОНЕЦ ИЗМЕНЕНИЙ ---
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from backup import create_backup, list_backups, restore_backup
+
 # Подавляем предупреждения
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # Загрузка переменных окружения
 load_dotenv()
 
+# --- ДОБАВЛЕНО: Функция для создания клиента Chroma с DuckDB ---
+PERSIST_DIRECTORY = "chroma_skolkovo"
+
+def get_chroma_client():
+    """Создает и возвращает клиент Chroma, использующий DuckDB."""
+    client = chromadb.PersistentClient(
+        path=PERSIST_DIRECTORY,
+        settings=Settings(
+            allow_reset=True, # Опционально
+            is_persistent=True
+        )
+    )
+    return client
+# --- КОНЕЦ ДОБАВЛЕНИЯ ---
+
 def get_llm():
     """Инициализирует и возвращает LLM через OpenRouter API."""
-    api_key = os.getenv("OPENROUTER_API_KEY") # Используем ключ из второго скрипта
+    api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         st.error("❌ Ключ API OpenRouter (OPENROUTER_API_KEY) не найден.")
         st.stop()
-    # Инициализация LLM через Langchain OpenAI обертку
+    # Исправлен URL (убраны пробелы)
     llm = ChatOpenAI(
-        model="google/gemini-2.5-flash", # Изменена модель
+        model="google/gemini-2.5-flash",
         openai_api_key=api_key,
-        openai_api_base="https://openrouter.ai/api/v1", # Исправлен URL (убраны пробелы)
-        temperature=0.3, # Оставлено как в обоих скриптах
-        max_tokens=8100, # Изменено на значение из второго скрипта
+        openai_api_base="https://openrouter.ai/api/v1", # Исправлено
+        temperature=0.3,
+        max_tokens=8100,
     )
     return llm
 
 class ModelManager:
     """Управление загрузкой и кэшированием моделей."""
     @staticmethod
-    @st.cache_resource(show_spinner = False)
+    @st.cache_resource(show_spinner=False)
     def preload_models():
         """Предзагрузка всех необходимых моделей при запуске"""
         embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-m3", # Изменено на модель из второго скрипта
+            model_name="BAAI/bge-m3",
             encode_kwargs={'normalize_embeddings': True}
         )
-        return embeddings #, None, None # Если бы использовали rerank/similarity, они бы возвращались здесь
+        return embeddings
 
 class DocumentProcessor:
     """Обработка и индексация PDF-документов."""
     def __init__(self, embeddings):
         self.embeddings = embeddings
+        # --- ДОБАВЛЕНО: Хранение клиента ---
+        self.client = get_chroma_client()
+        # --- КОНЕЦ ДОБАВЛЕНИЯ ---
 
-    # --- ОСТАВЛЕНО: determine_doc_type ---
     def determine_doc_type(self, pdf_path):
         """Определяет тип документа по имени файла"""
         filename = os.path.basename(pdf_path).lower()
@@ -73,13 +93,12 @@ class DocumentProcessor:
         else:
             return "Документ"
 
-    # --- ИЗМЕНЕНО: index_pdf ---
     def index_pdf(self, pdf_path):
         """Индексирует PDF-файл и сохраняет в Chroma."""
         if not os.path.exists(pdf_path):
             st.error(f"Файл {pdf_path} не найден!")
             return None
-        with st.spinner():
+        with st.spinner(f"Индексирую {os.path.basename(pdf_path)}..."):
             loader = PyPDFLoader(pdf_path)
             documents = loader.load()
             if not documents:
@@ -90,7 +109,6 @@ class DocumentProcessor:
                 st.error(f"Файл {pdf_path} не содержит извлекаемого текста (возможно сканированный PDF)")
                 return None
 
-            # --- ИЗМЕНЕНО: Улучшение метаданных (оставлено) ---
             for doc in documents:
                 if 'source' not in doc.metadata or not doc.metadata['source']:
                      doc.metadata['source'] = pdf_path
@@ -109,24 +127,27 @@ class DocumentProcessor:
                      doc.metadata['section_title'] = "Без заголовка"
 
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=750, 
-                chunk_overlap=300, 
-                separators=["\n\n", "\n", ". ", " ", ""] 
+                chunk_size=750,
+                chunk_overlap=300,
+                separators=["\n\n", "\n", ". ", " ", ""]
             )
             docs = text_splitter.split_documents(documents)
             if not docs:
                 st.error(f"Не удалось создать чанки из файла {pdf_path}")
                 return None
 
-            db = Chroma.from_documents(docs, self.embeddings, persist_directory="chroma_skolkovo") # Из второго скрипта
+            # --- ИЗМЕНЕНО: Использование клиента ---
+            db = Chroma.from_documents(docs, self.embeddings, client=self.client)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            st.success(f"✅ Документ {os.path.basename(pdf_path)} успешно индексирован!")
             return db
 
     def get_indexed_files(self):
         """Получает список индексированных файлов."""
         try:
-            # --- ИЗМЕНЕНО: Использование persist_directory="chroma_skolkovo" ---
-            if os.path.exists("chroma_skolkovo"): # Из второго скрипта
-                db = Chroma(persist_directory="chroma_skolkovo", embedding_function=self.embeddings) # Из второго скрипта
+            # --- ИЗМЕНЕНО: Использование клиента ---
+            if os.path.exists(PERSIST_DIRECTORY):
+                db = Chroma(client=self.client, embedding_function=self.embeddings)
                 docs = db.get()
                 if docs and docs.get('ids'):
                     sources = set()
@@ -137,18 +158,19 @@ class DocumentProcessor:
                              if source_path:
                                  filename = os.path.basename(source_path)
                                  sources.add(filename)
-                        return list(sources)
+                        return sorted(list(sources)) # Сортируем для порядка
             return []
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except Exception as e:
             st.warning(f"Не удалось получить список документов: {e}")
             return []
 
-    # --- ИЗМЕНЕНО: remove_document_from_index ---
     def remove_document_from_index(self, filename):
         """Удаляет документ из индекса."""
         try:
-            if os.path.exists("chroma_skolkovo"): # Из второго скрипта
-                db = Chroma(persist_directory="chroma_skolkovo", embedding_function=self.embeddings) # Из второго скрипта
+            # --- ИЗМЕНЕНО: Использование клиента ---
+            if os.path.exists(PERSIST_DIRECTORY):
+                db = Chroma(client=self.client, embedding_function=self.embeddings)
                 docs = db.get()
                 ids_to_delete = []
                 for i, metadata in enumerate(docs['metadatas']):
@@ -161,38 +183,40 @@ class DocumentProcessor:
                 else:
                     st.warning(f"Документ {filename} не найден в индексе")
                     return False
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except Exception as e:
             st.error(f"Ошибка при удалении документа: {e}")
             return False
 
-    # --- ИЗМЕНЕНО: auto_index_all_pdfs ---
     def auto_index_all_pdfs(self):
         """Автоматически индексирует все PDF-файлы в папке data при запуске."""
         if not os.path.exists("data"):
             os.makedirs("data")
+            st.info("Создана папка 'data'. Поместите сюда PDF-файлы для индексации.")
             return
         pdf_files = [f for f in os.listdir("data") if f.endswith('.pdf')]
         if not pdf_files:
-            st.warning("В папке 'data' не найдено PDF-файлов для индексации")
+            st.info("В папке 'data' не найдено PDF-файлов для индексации")
             return
         indexed_files = self.get_indexed_files()
-        files_to_index = []
-        for pdf_file in pdf_files:
-            if pdf_file not in indexed_files:
-                files_to_index.append(pdf_file)
+        files_to_index = [f for f in pdf_files if f not in indexed_files]
+
         if files_to_index:
-            for pdf_file in files_to_index:
-                pdf_path = f"data/{pdf_file}"
-                try:
-                    self.index_pdf(pdf_path)
-                except Exception as e:
-                    st.error(f"Ошибка при индексации {pdf_file}: {str(e)}")
+             st.info(f"Найдено {len(files_to_index)} новых файлов для индексации.")
+             for pdf_file in files_to_index:
+                 pdf_path = f"data/{pdf_file}"
+                 try:
+                     self.index_pdf(pdf_path)
+                 except Exception as e:
+                     st.error(f"Ошибка при индексации {pdf_file}: {str(e)}")
+             st.success("✅ Автоматическая индексация завершена!")
+        else:
+             st.info("Все PDF-файлы в папке 'data' уже проиндексированы.")
 
 class CorrectionManager:
     """Управление правками и шаблонами ответов."""
-    # --- ИЗМЕНЕНО: Убрана зависимость от similarity_model ---
     def __init__(self):
-        pass # Пустой конструктор
+        pass
 
     def load_corrections(self):
         """Загружает правки из YAML файла."""
@@ -245,21 +269,23 @@ class LogManager:
                 len(answer)
             ])
 
-
 class RAGSystem:
     """Основная система вопросов-ответов (RAG)."""
     def __init__(self):
         self.model_manager = ModelManager()
         self.prompt_manager = PromptManager()
         self.embeddings = self.model_manager.preload_models()
+        # --- ИЗМЕНЕНО: Передаем embeddings в DocumentProcessor ---
         self.document_processor = DocumentProcessor(self.embeddings)
+        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         self.correction_manager = CorrectionManager()
         self.log_manager = LogManager()
 
     def query_rag(self, question):
         """Задаёт вопрос и возвращает ответ + источник."""
         try:
-            if not os.path.exists("chroma_skolkovo"):
+            # --- ИЗМЕНЕНО: Проверка через клиента ---
+            if not os.path.exists(PERSIST_DIRECTORY):
                 response = {
                     "answer": "❌ База знаний не найдена. Пожалуйста, загрузите документы.",
                     "sources": ["Система"],
@@ -268,7 +294,11 @@ class RAGSystem:
                 self.log_manager.log_request(question, response["answer"], response["sources"], False)
                 return response
 
-            db = Chroma(persist_directory="chroma_skolkovo", embedding_function=self.embeddings)
+            # --- ИЗМЕНЕНО: Использование клиента ---
+            client = get_chroma_client() # Получаем клиент
+            db = Chroma(client=client, embedding_function=self.embeddings)
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            
             try:
                 llm = get_llm()
             except Exception as e:
@@ -280,29 +310,28 @@ class RAGSystem:
                 }
                 self.log_manager.log_request(question, response["answer"], response["sources"], False)
                 return response
+            
             retriever = db.as_retriever(
-                search_type="similarity_score_threshold", # Из второго скрипта
+                search_type="similarity_score_threshold",
                 search_kwargs={
-                    "k": 75, # Из второго скрипта
-                    "score_threshold": 0.3 # Из второго скрипта
+                    "k": 75,
+                    "score_threshold": 0.3
                 }
             )
 
-            # --- ИЗМЕНЕНО: Загрузка системного промпта ---
             system_prompt = self.prompt_manager.load_system_prompt()
 
-            prompt_template = system_prompt # Системный промпт уже содержит всю необходимую структуру
+            prompt_template = system_prompt
 
             prompt = PromptTemplate(
                 template=prompt_template,
                 input_variables=["context", "question"]
             )
 
-            # --- ИЗМЕНЕНО: Создание QA цепочки ---
             qa = RetrievalQA.from_chain_type(
                 llm=llm,
                 chain_type="stuff",
-                retriever=retriever, # Используем напрямую созданный retriever
+                retriever=retriever,
                 return_source_documents=True,
                 chain_type_kwargs={"prompt": prompt}
             )
@@ -320,6 +349,7 @@ class RAGSystem:
             def is_answer_useful(answer_text: str) -> bool:
                 useless_phrases = ["в документах не указано", "конкретная информация отсутствует", "не удалось найти прямое упоминание"]
                 return not any(phrase in answer_text.lower() for phrase in useless_phrases)
+            
             if not is_answer_useful(answer):
                 answer = "К сожалению, точной информации не найдено. Рекомендую обратить внимание на разделы, касающиеся интеллектуальной собственности или отчетности."
 
@@ -339,7 +369,6 @@ class RAGSystem:
             self.log_manager.log_request(question, response["answer"], response["sources"], False)
             return response
 
-# --- ОСТАВЛЕНО: UserManager ---
 class UserManager:
     """Управление пользователями и аутентификацией."""
     @staticmethod
@@ -388,6 +417,7 @@ class AdminPanel:
         """Отображает админ-панель."""
         st.title("🔒 Админ-панель")
         admin_tabs = st.tabs(["Пользователи", "Журнал правок", "Статистика", "Резервное копирование"])
+        
         with admin_tabs[0]:
             st.subheader("👥 Управление пользователями")
             users_data = self.user_manager.load_users()
@@ -428,6 +458,7 @@ class AdminPanel:
                                 st.error("Не удалось сохранить пользователя.")
                     else:
                         st.error("Заполните все поля")
+        
         with admin_tabs[1]:
             st.subheader("📝 Журнал правок")
             corrections = self.correction_manager.load_corrections()
@@ -443,6 +474,7 @@ class AdminPanel:
                 st.table(correction_data)
             else:
                 st.info("Пока нет сохраненных правок")
+        
         with admin_tabs[2]:
             st.subheader("📊 Статистика")
             log_file = "logs/requests.csv"
@@ -472,6 +504,7 @@ class AdminPanel:
                     st.error(f"Ошибка при загрузке статистики: {e}")
             else:
                 st.info("Логи запросов пока отсутствуют")
+        
         with admin_tabs[3]:
             st.subheader("💾 Резервное копирование")
             if st.button("Создать резервную копию"):
@@ -510,6 +543,7 @@ class SkolkovoConsultantApp:
     def main(self):
         if "authenticated" not in st.session_state:
             st.session_state.authenticated = False
+
         if not st.session_state.authenticated:
             st.title("🏢 Консультант по проекту «Сколково»")
             st.subheader("🔐 Вход в систему")
@@ -528,14 +562,17 @@ class SkolkovoConsultantApp:
                     else:
                         st.error("Неверный логин или пароль")
             return
+
         if st.session_state.role == "user":
             st.set_page_config(page_title="Консультант по Сколково", page_icon="🏢", layout="centered")
         else:
             st.set_page_config(page_title="Консультант по Сколково", page_icon="🏢", layout="wide")
+
         if st.session_state.role == "admin":
             page = st.sidebar.selectbox("Навигация", ["Чат", "Админ-панель"])
         else:
             page = "Чат"
+
         if st.session_state.role == "user":
             st.title("🏢 Консультант по проекту «Сколково»")
             st.caption(f"Вы вошли как: {st.session_state.username} ({st.session_state.role})")
@@ -563,16 +600,20 @@ class SkolkovoConsultantApp:
                         del st.session_state[messages_key]
                     st.rerun()
             st.caption(f"Вы вошли как: {st.session_state.username} ({st.session_state.role})")
+
         if page == "Админ-панель":
             self.admin_panel.show_admin_panel()
             return
+
         messages_key = f"messages_{st.session_state.username}"
         if messages_key not in st.session_state:
             st.session_state[messages_key] = []
+
         editing_key = f"editing_message_index_{st.session_state.username}"
         edit_question_key = f"edit_question_{st.session_state.username}"
         edit_answer_key = f"edit_answer_{st.session_state.username}"
         edit_sources_key = f"edit_sources_{st.session_state.username}"
+        
         if editing_key not in st.session_state:
             st.session_state[editing_key] = None
         if edit_question_key not in st.session_state:
@@ -581,13 +622,18 @@ class SkolkovoConsultantApp:
             st.session_state[edit_answer_key] = ""
         if edit_sources_key not in st.session_state:
             st.session_state[edit_sources_key] = []
+
         if "models_loaded" not in st.session_state:
             st.session_state.embeddings = ModelManager.preload_models()
             st.session_state.models_loaded = True
+
         if "indexed_on_startup" not in st.session_state:
             with st.spinner("Проверяем индексацию документов..."):
+                # --- ИЗМЕНЕНО: Используем метод из rag_system ---
                 self.rag_system.document_processor.auto_index_all_pdfs()
+                # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             st.session_state.indexed_on_startup = True
+
         chat_container = st.container()
         with chat_container:
             for i, message in enumerate(st.session_state[messages_key]):
@@ -637,6 +683,7 @@ class SkolkovoConsultantApp:
                                     st.rerun()
                     else:
                         st.markdown(message["content"])
+
         if prompt := st.chat_input("Введите ваш вопрос..."):
             st.session_state[messages_key].append({"role": "user", "content": prompt})
             with chat_container:
@@ -660,12 +707,16 @@ class SkolkovoConsultantApp:
                         "template_id": response.get("template_id")
                     })
             st.rerun()
+
         if st.session_state.role in ["admin", "editor"]:
             with st.sidebar:
                 st.header("⚙️ Управление")
-                if os.path.exists("chroma_skolkovo"): # Из второго скрипта
+                # --- ИЗМЕНЕНО: Проверка через os.path.exists(PERSIST_DIRECTORY) ---
+                if os.path.exists(PERSIST_DIRECTORY):
                     st.success("✅ База знаний загружена")
+                    # --- ИЗМЕНЕНО: Используем метод из rag_system ---
                     indexed_files = self.rag_system.document_processor.get_indexed_files()
+                    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                     if indexed_files:
                         st.subheader("Индексированные документы:")
                         for filename in indexed_files:
@@ -675,12 +726,15 @@ class SkolkovoConsultantApp:
                             with col2:
                                 if st.session_state.role == "admin":
                                     if st.button("❌", key=f"delete_{filename}", help=f"Удалить {filename}"):
-                                        if self.rag_system.document_processor.remove_document_from_index(filename): # Это также обновляет ALL_DOCUMENTS
+                                        # --- ИЗМЕНЕНО: Используем метод из rag_system ---
+                                        if self.rag_system.document_processor.remove_document_from_index(filename):
                                             st.rerun()
+                                        # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                                 else:
                                     st.write("")
                 else:
                     st.warning("❌ База знаний не найдена")
+                
                 if st.session_state.role == "admin":
                     st.divider()
                     st.subheader("Добавить документ")
@@ -691,15 +745,21 @@ class SkolkovoConsultantApp:
                             f.write(uploaded_file.getbuffer())
                         st.success(f"✅ Файл {uploaded_file.name} сохранен в папке data/")
                         if st.button("Индексировать документ", key="index_btn"):
+                            # --- ИЗМЕНЕНО: Используем метод из rag_system ---
                             self.rag_system.document_processor.index_pdf(file_path)
+                            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                             st.rerun()
+                
                 if st.session_state.role == "admin":
                     st.divider()
                     if st.button("🔄 Обновить индекс"):
                         with st.spinner("Обновляем индекс..."):
+                            # --- ИЗМЕНЕНО: Используем метод из rag_system ---
                             self.rag_system.document_processor.auto_index_all_pdfs()
+                            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
                         st.success("Индекс обновлен!")
                         st.rerun()
+                
                 st.divider()
                 st.subheader("Сохраненные правки")
                 corrections = self.rag_system.correction_manager.load_corrections()
@@ -724,7 +784,6 @@ class PromptManager:
             with open("system_prompt.txt", "r", encoding="utf-8") as f:
                 return f.read().strip()
         except FileNotFoundError:
-            # --- ИЗМЕНЕНО: Обновленный системный промпт из второго скрипта ---
             return """Ты — эксперт по нормативным документам и льготам участников проекта «Сколково».
 Твоя задача — предоставить точный, структурированный и краткий ответ на вопрос, используя исключительно информацию из предоставленного контекста.
 
