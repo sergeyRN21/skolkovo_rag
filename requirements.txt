@@ -9,4 +9,5 @@ networkx
 matplotlib
 bcrypt
 langchain-experimental
-langchain_chroma
+langchain-chroma
+
