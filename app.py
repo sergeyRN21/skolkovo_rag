@@ -35,7 +35,7 @@ CONFIG = {
         "page_icon": "🏢"
     },
     "llm": {
-        "model": "google/gemini-2.5-flash", # Рассмотрите gemini-1.5-pro для более сложных задач
+        "model": "google/gemini-2.5-flash",
         "temperature": 0.2,
         "max_tokens": 10000,
         "base_url": "https://openrouter.ai/api/v1",
@@ -136,7 +136,6 @@ class DocumentProcessor:
                 else:
                     doc.metadata['section_title'] = "Без заголовка"
 
-            # Рассмотрите ParentDocumentRetriever для более точного контекста
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=512,
                 chunk_overlap=128,
@@ -354,7 +353,6 @@ class RAGSystem:
             with open("legal_docs_db.json", "w", encoding="utf-8") as f:
                 json.dump(default_legal_db, f, ensure_ascii=False, indent=2)
             return default_legal_db
-    # Добавьте этот метод в class RAGSystem:
     def classify_question(self, question: str) -> str:
         """
         Классифицирует вопрос на один из предопределенных типов.
